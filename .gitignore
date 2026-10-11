@@ -1,0 +1,12 @@
+# 비밀정보 / 실행 산출물 - 절대 커밋 금지
+.env
+*.env
+*secret*
+*apikey*
+*api_key*
+grid_state*.json
+grid_state*.json.*
+grid_bot*.log*
+__pycache__/
+*.pyc
+.venv/
