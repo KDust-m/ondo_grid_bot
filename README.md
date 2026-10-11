@@ -38,6 +38,25 @@ py ondo_grid_bot.py
 - 키는 코드·파일 어디에도 저장하지 않고 실행할 때마다 입력합니다.
 - 거래소 API Keys 페이지에서 **출금 권한 없이** 거래 권한만 주고, 가능하면 **IP 화이트리스트**를 설정하세요.
 
+## 서버(VPS) 운영 — Ubuntu
+환경변수 `ONDO_API_KEY_ID` 가 있으면 **서버 모드**로 동작합니다: 아무것도 묻지 않고, 신규 시작 시 설정 파일의 값으로 바로 시작합니다.
+
+```
+sudo git clone <repo> /opt/ondo_grid_bot
+sudo bash /opt/ondo_grid_bot/deploy/install.sh
+sudo cp /opt/ondo_grid_bot/deploy/config.example.env /etc/ondo-grid/BTC-USD.P.env
+sudo nano /etc/ondo-grid/BTC-USD.P.env          # 키·간격·배율·비율 입력
+sudo chmod 600 /etc/ondo-grid/BTC-USD.P.env
+sudo systemctl enable --now ondo-grid@BTC-USD.P
+journalctl -u ondo-grid@BTC-USD.P -f              # 로그 보기
+```
+- 페어는 서비스 이름으로 정합니다 (`ondo-grid@WTI-USD.P` + `/etc/ondo-grid/WTI-USD.P.env`).
+- 상태·로그: `/var/lib/ondo-grid/`
+- 서버 재부팅·오류 시 자동 재시작. 설정 오류(키 틀림, 잘못된 값)면 재시작하지 않고 로그에 이유를 남깁니다.
+- 중지: `sudo systemctl stop ondo-grid@BTC-USD.P` (주문은 거래소에 유지)
+- **같은 페어를 PC와 서버에서 동시에 돌리지 마세요.**
+- API 키 IP 화이트리스트에 서버 IP를 등록하세요.
+
 ## 테스트 (실제 주문 없음)
 ```
 py test_grid_logic.py

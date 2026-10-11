@@ -21,6 +21,7 @@ import json
 import logging
 import logging.handlers
 import os
+import signal
 import sys
 import time
 import urllib.error
@@ -44,6 +45,8 @@ CID_PREFIX = "og"                   # 이 봇이 낸 주문을 식별하는 clie
 USER_AGENT = "ondo-grid-bot/1.0"    # 기본 Python-urllib UA 는 403 차단됨
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("ONDO_DATA_DIR") or APP_DIR   # 상태/로그 저장 위치 (서버: /var/lib/ondo-grid)
+CONFIG_ERROR_EXIT = 2                                    # 설정 오류 종료코드 (systemd 가 재시작하지 않음)
 
 # 실행 시 입력받은 페어로 configure_market() 이 설정 (페어마다 상태/로그 파일 분리)
 MARKET = ""
@@ -56,8 +59,8 @@ log = logging.getLogger("grid")
 def configure_market(market: str) -> None:
     global MARKET, STATE_FILE, LOG_FILE
     MARKET = market
-    STATE_FILE = os.path.join(APP_DIR, f"grid_state_{market}.json")
-    LOG_FILE = os.path.join(APP_DIR, f"grid_bot_{market}.log")
+    STATE_FILE = os.path.join(DATA_DIR, f"grid_state_{market}.json")
+    LOG_FILE = os.path.join(DATA_DIR, f"grid_bot_{market}.log")
 
 
 def normalize_market(text: str) -> str:
@@ -594,6 +597,35 @@ def setup_logging() -> None:
     log.addHandler(fh)
 
 
+def config_error(msg: str):
+    """서버 모드 설정 오류: 기록하고 종료 (systemd 는 이 종료코드면 재시작하지 않음)."""
+    if log.handlers:
+        log.error(msg)
+    else:
+        print(msg, file=sys.stderr)
+    raise SystemExit(CONFIG_ERROR_EXIT)
+
+
+def env_decimal(name: str, default: Decimal) -> Decimal:
+    raw = (os.environ.get(name) or "").strip().rstrip("%").strip()
+    try:
+        return D(raw) if raw else default
+    except Exception:
+        config_error(f"설정 {name}={raw!r} 는 숫자가 아닙니다.")
+
+
+def env_market() -> str:
+    """서버 모드: ONDO_MARKET 환경변수의 페어를 검증해서 반환."""
+    market = normalize_market(os.environ.get("ONDO_MARKET", ""))
+    try:
+        markets = {p["market"] for p in OndoClient("", "").perps_markets(auth=False)}
+    except (ApiError, NetworkError) as e:
+        raise SystemExit(f"마켓 목록을 불러올 수 없습니다 (잠시 후 재시도): {e}")
+    if market not in markets:
+        config_error(f"설정 ONDO_MARKET={market!r} 페어가 없습니다. 사용 가능: {', '.join(sorted(markets))}")
+    return market
+
+
 def prompt_market() -> str:
     try:
         markets = {p["market"]: p for p in OndoClient("", "").perps_markets(auth=False)}
@@ -711,12 +743,21 @@ def apply_leverage(client: OndoClient, target: int) -> None:
         log.warning("레버리지 설정 실패 (현재 %s): %s", lev, e)
 
 
-def prompt_credentials() -> tuple[str, str]:
-    key_id = getpass.getpass("API Key ID (입력 내용은 표시되지 않습니다): ").strip()
-    secret = getpass.getpass("API Secret (입력 내용은 표시되지 않습니다): ").strip()
+def prompt_credentials(headless: bool) -> tuple[str, str]:
+    if headless:
+        # 서버 모드: 권한 600 설정 파일 → systemd 가 환경변수로 전달. 읽은 뒤 환경변수에서 제거.
+        key_id = os.environ.pop("ONDO_API_KEY_ID", "").strip()
+        secret = os.environ.pop("ONDO_API_SECRET", "").strip()
+    else:
+        key_id = getpass.getpass("API Key ID (입력 내용은 표시되지 않습니다): ").strip()
+        secret = getpass.getpass("API Secret (입력 내용은 표시되지 않습니다): ").strip()
     if not key_id.startswith("ondoKeyId_") or not secret.startswith("ondoApiSecret_"):
-        raise SystemExit("키 형식이 올바르지 않습니다 (ondoKeyId_..., ondoApiSecret_...).")
+        config_error("키 형식이 올바르지 않습니다 (ondoKeyId_..., ondoApiSecret_...).")
     return key_id, secret
+
+
+def _on_sigterm(signum, frame):
+    raise KeyboardInterrupt
 
 
 def main() -> None:
@@ -724,11 +765,15 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    # 서버 모드: 설정 파일(환경변수)에 키가 있으면 아무것도 묻지 않고 실행
+    headless = bool(os.environ.get("ONDO_API_KEY_ID"))
+    signal.signal(signal.SIGTERM, _on_sigterm)  # systemctl stop → Ctrl+C 와 동일하게 정리 후 종료
     print("=" * 60)
-    print(f" Ondo Perps 그리드 봇  |  위/아래 각 {LEVELS_PER_SIDE}개 주문")
+    print(f" Ondo Perps 그리드 봇  |  위/아래 각 {LEVELS_PER_SIDE}개 주문" + ("  |  서버 모드" if headless else ""))
     print("=" * 60)
 
-    configure_market(prompt_market())
+    os.makedirs(DATA_DIR, exist_ok=True)
+    configure_market(env_market() if headless else prompt_market())
     legacy = os.path.join(APP_DIR, "grid_state.json")  # 이전 버전(BTC 전용) 상태 파일 이전
     if os.path.exists(legacy) and not os.path.exists(STATE_FILE):
         try:
@@ -741,7 +786,7 @@ def main() -> None:
     setup_logging()
     log.info("거래 페어: %s", MARKET)
 
-    key_id, secret = prompt_credentials()
+    key_id, secret = prompt_credentials(headless)
     client = OndoClient(key_id, secret)
     del secret
 
@@ -749,7 +794,9 @@ def main() -> None:
         client.sync_time()
         bal = client.balance()  # 인증 확인
     except ApiError as e:
-        raise SystemExit(f"인증 실패: {e}\n키/시크릿, 권한(scope), IP 화이트리스트를 확인하세요.")
+        if e.status in (401, 403):
+            config_error(f"인증 실패: {e}\n키/시크릿, 권한(scope), IP 화이트리스트를 확인하세요.")
+        raise SystemExit(f"잔액 조회 실패 (잠시 후 재시도): {e}")
     log.info("인증 성공 | 사용가능 잔액 %s USDC | 마진잔액 %s USDC", bal["availableMargin"], bal["marginBalance"])
 
     cfg = client.market_config()
@@ -807,8 +854,8 @@ def main() -> None:
     else:
         # ── 신규 시작 ──
         if position != 0:
-            raise SystemExit(f"{MARKET} 포지션({fmt(position)})이 있지만 그리드 주문이 없습니다. "
-                             "포지션을 정리한 뒤 다시 실행하세요.")
+            config_error(f"{MARKET} 포지션({fmt(position)})이 있지만 그리드 주문이 없습니다. "
+                         "포지션을 정리한 뒤 다시 실행하세요.")
         if state:
             archive_state()
         mark = client.mark_price()
@@ -816,27 +863,43 @@ def main() -> None:
         capital = D(bal["availableMargin"])
         size_inc = D(cfg["baseIncrement"])
         if calc_order_size(capital, base, size_inc, D(100)) < size_inc:
-            raise SystemExit(f"잔액이 부족합니다: 잔액 전체로도 최소 주문 수량({cfg['baseIncrement']} {unit})이 안 됩니다.")
-        print(f"사용 가능 잔액: {fmt(capital)} USDC | 현재가: {fmt(base)}")
-        step_pct = prompt_grid_step(base, cfg)
-        leverage = prompt_leverage(market_max_leverage(cfg))
-        order_pct = prompt_order_pct(leverage, capital, base, size_inc)
+            config_error(f"잔액이 부족합니다: 잔액 전체로도 최소 주문 수량({cfg['baseIncrement']} {unit})이 안 됩니다.")
+        max_lev = market_max_leverage(cfg)
+        if headless:
+            step_pct = env_decimal("GRID_STEP_PCT", DEFAULT_GRID_STEP_PCT)
+            lev_raw = env_decimal("LEVERAGE", D(min(DEFAULT_LEVERAGE, max_lev or DEFAULT_LEVERAGE)))
+            if lev_raw != lev_raw.to_integral_value():
+                config_error(f"설정 LEVERAGE={fmt(lev_raw)} 는 정수여야 합니다.")
+            leverage = int(lev_raw)
+            order_pct = env_decimal("ORDER_PCT", DEFAULT_ORDER_PCT)
+            problem = (grid_step_problem(step_pct, base, D(cfg["quoteIncrement"]))
+                       or leverage_problem(leverage, max_lev)
+                       or order_pct_problem(order_pct, leverage, capital, base, size_inc))
+            if problem:
+                config_error(f"설정 오류 (GRID_STEP_PCT={fmt(step_pct)}, LEVERAGE={leverage}, "
+                             f"ORDER_PCT={fmt(order_pct)}): {problem}")
+        else:
+            print(f"사용 가능 잔액: {fmt(capital)} USDC | 현재가: {fmt(base)}")
+            step_pct = prompt_grid_step(base, cfg)
+            leverage = prompt_leverage(max_lev)
+            order_pct = prompt_order_pct(leverage, capital, base, size_inc)
         order_size = calc_order_size(capital, base, size_inc, order_pct)
         state = new_state(base, capital, order_size, step_pct, leverage, order_pct)
         bot = GridBot(client, state, cfg, persist=False)
-        print("-" * 60)
-        print(f" 신규 시작       : {MARKET}")
-        print(f" 기준가          : {fmt(base)}")
-        print(f" 그리드 간격     : {fmt(step_pct)}% (범위 ±{fmt(step_pct * LEVELS_PER_SIDE)}%)")
-        print(f" 숏 주문 범위    : {fmt(bot.price(1))} ~ {fmt(bot.price(LEVELS_PER_SIDE))} ({LEVELS_PER_SIDE}개)")
-        print(f" 롱 주문 범위    : {fmt(bot.price(-1))} ~ {fmt(bot.price(-LEVELS_PER_SIDE))} ({LEVELS_PER_SIDE}개)")
-        print(f" 사용 가능 잔액  : {fmt(capital)} USDC")
-        print(f" 주문 수량       : {fmt(order_size)} {unit} (모든 주문 동일, 기준가 기준 약 "
-              f"{fmt(round_to(order_size * base, D('0.01')))} USDC = 잔액의 {fmt(order_pct)}% 이하)")
-        print(f" 레버리지        : {leverage}x (한쪽 주문 전체 증거금 ≈ 잔액의 "
-              f"{fmt(round_to(margin_use_pct(order_pct, leverage), D('0.1')))}%)")
-        print("-" * 60)
-        if input("위 설정으로 실제 주문을 시작하려면 y 를 입력하세요: ").strip().lower() != "y":
+        say = log.info if headless else print
+        say("-" * 60)
+        say(f" 신규 시작       : {MARKET}")
+        say(f" 기준가          : {fmt(base)}")
+        say(f" 그리드 간격     : {fmt(step_pct)}% (범위 ±{fmt(step_pct * LEVELS_PER_SIDE)}%)")
+        say(f" 숏 주문 범위    : {fmt(bot.price(1))} ~ {fmt(bot.price(LEVELS_PER_SIDE))} ({LEVELS_PER_SIDE}개)")
+        say(f" 롱 주문 범위    : {fmt(bot.price(-1))} ~ {fmt(bot.price(-LEVELS_PER_SIDE))} ({LEVELS_PER_SIDE}개)")
+        say(f" 사용 가능 잔액  : {fmt(capital)} USDC")
+        say(f" 주문 수량       : {fmt(order_size)} {unit} (모든 주문 동일, 기준가 기준 약 "
+            f"{fmt(round_to(order_size * base, D('0.01')))} USDC = 잔액의 {fmt(order_pct)}% 이하)")
+        say(f" 레버리지        : {leverage}x (한쪽 주문 전체 증거금 ≈ 잔액의 "
+            f"{fmt(round_to(margin_use_pct(order_pct, leverage), D('0.1')))}%)")
+        say("-" * 60)
+        if not headless and input("위 설정으로 실제 주문을 시작하려면 y 를 입력하세요: ").strip().lower() != "y":
             raise SystemExit("취소했습니다.")
         apply_leverage(client, leverage)
         save_state(state)

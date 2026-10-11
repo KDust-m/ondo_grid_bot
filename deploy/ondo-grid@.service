@@ -1,0 +1,39 @@
+# Ondo Perps 그리드 봇 (페어별 인스턴스)
+#   설정 파일 : /etc/ondo-grid/<페어>.env   (예: /etc/ondo-grid/BTC-USD.P.env, 권한 600)
+#   시작      : systemctl enable --now ondo-grid@BTC-USD.P
+#   로그      : journalctl -u ondo-grid@BTC-USD.P -f
+[Unit]
+Description=Ondo Perps grid bot (%i)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ondo
+Group=ondo
+WorkingDirectory=/opt/ondo_grid_bot
+Environment=ONDO_MARKET=%i
+Environment=ONDO_DATA_DIR=/var/lib/ondo-grid
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/ondo-grid/%i.env
+ExecStart=/usr/bin/python3 -B /opt/ondo_grid_bot/ondo_grid_bot.py
+# 네트워크 오류 등으로 죽으면 30초 뒤 재시작, 설정 오류(종료코드 2)면 재시작하지 않음
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2
+StateDirectory=ondo-grid
+StateDirectoryMode=0700
+
+# 보안 강화
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

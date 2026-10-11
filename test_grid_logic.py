@@ -224,6 +224,21 @@ class GridTest(unittest.TestCase):
         drain(bot, self.ex)
         self.assertEqual({o["size"] for o in open_entries(self.ex)}, {"0.0003"})
 
+    def test_headless_config_helpers(self):
+        import os
+        os.environ["X_TEST_PCT"] = " 0.35% "
+        self.assertEqual(g.env_decimal("X_TEST_PCT", D("0.2")), D("0.35"))
+        os.environ["X_TEST_PCT"] = ""
+        self.assertEqual(g.env_decimal("X_TEST_PCT", D("0.2")), D("0.2"))
+        os.environ["X_TEST_PCT"] = "abc"
+        with self.assertRaises(SystemExit) as cm:
+            g.env_decimal("X_TEST_PCT", D("0.2"))
+        self.assertEqual(cm.exception.code, g.CONFIG_ERROR_EXIT)  # systemd 재시작 안 함
+        del os.environ["X_TEST_PCT"]
+        os.environ["ONDO_API_KEY_ID"], os.environ["ONDO_API_SECRET"] = "ondoKeyId_x", "ondoApiSecret_y"
+        self.assertEqual(g.prompt_credentials(True), ("ondoKeyId_x", "ondoApiSecret_y"))
+        self.assertNotIn("ONDO_API_SECRET", os.environ)  # 읽은 뒤 환경변수에서 제거
+
     def test_cid_roundtrip(self):
         for lvl in (1, -1, 50, -50):
             cid = g.make_cid(D("83031"), D("0.35"), "close", lvl)
